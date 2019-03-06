@@ -4,18 +4,23 @@ import(
 	"github.com/bwmarrin/discordgo"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
+	"strings"
 )
 
 type state struct{
 	Name string
 	talking bool
 	channel string
+	channelID string
 }
 
 var(
 	Token = "Bot " + os.Getenv("TOKEN")
 	stopBot = make(chan bool)
 	usermap = map[string]*state{}
+	notifiedChannel = map[string]string{}
 )
 
 func main(){
@@ -26,14 +31,16 @@ func main(){
 	}
 
 	discord.AddHandler(voice)
+	discord.AddHandler(messageCatch)
 
 	err = discord.Open()
 	if err != nil {
 		panic(err)
 	}
 
-	<- stopBot
-	return
+	sc := make(chan os.Signal, 1)
+	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
+	<-sc
 }
 
 func voice(s *discordgo.Session, vs *discordgo.VoiceStateUpdate){
@@ -45,38 +52,42 @@ func voice(s *discordgo.Session, vs *discordgo.VoiceStateUpdate){
 		usermap[vs.UserID].Name = user.Username
 		usermap[vs.UserID].talking = false
 		usermap[vs.UserID].channel = ""
+		usermap[vs.UserID].channelID = ""
 	}
 
 	if len(vs.ChannelID) > 0 && usermap[vs.UserID].talking == false{
 
 		channel, _ := s.Channel(vs.ChannelID)
-		enterning(s, vs.UserID, channel.Name)
+		enterning(s, vs.UserID, channel.Name, channel.GuildID, notifiedChannel[channel.GuildID])
 
 	}else if usermap[vs.UserID].talking == true {
 
 		message := usermap[vs.UserID].Name+"さんが"+usermap[vs.UserID].channel+"から退室しました"
 		channel, _ := s.Channel(vs.ChannelID)
-
-		channelID := channelList(s, "マンメンミ！")
-		sendMessage(s, channelID, message)
+		channelid := usermap[vs.UserID].channelID
+		if len(channelid) > 0 {
+			sendMessage(s, channelid, message)
+		}
 
 		if channel != nil && channel.Type == 2{
 
-			enterning(s, vs.UserID, channel.Name)
+			enterning(s, vs.UserID, channel.Name, channel.GuildID, notifiedChannel[channel.GuildID])
 		}else if channel == nil{
 			usermap[vs.UserID].talking = false
 			usermap[vs.UserID].channel = ""
-			return
 		}
 	}
 }
 
-func enterning(s *discordgo.Session, id string, name string){
+func enterning(s *discordgo.Session, id string, name string, guildID string, channelID string){
 	usermap[id].talking = true
 	usermap[id].channel = name
+	usermap[id].channelID = channelID
 	message := usermap[id].Name+"さんが"+name+"に入室しました"
-	channelid := channelList(s, "マンメンミ！")
-	sendMessage(s, channelid, message)
+	channelid := notifiedChannel[guildID]
+	if len(channelid) > 0{
+		sendMessage(s, channelid, message)
+	}
 }
 
 func sendMessage(s *discordgo.Session, id string, msg string) {
@@ -86,8 +97,8 @@ func sendMessage(s *discordgo.Session, id string, msg string) {
 	}
 }
 
-func channelList(s *discordgo.Session, name string) string {
-	var channnelid string
+func channelList(s *discordgo.Session, name string, guildID string) bool {
+	channelIs := false
 
 	for _, guild := range s.State.Guilds{
 		channels, _ := s.GuildChannels(guild.ID)
@@ -95,11 +106,30 @@ func channelList(s *discordgo.Session, name string) string {
 			if c.Type != discordgo.ChannelTypeGuildText {
 				continue
 			}
-			if name == c.Name {
-				channnelid = c.ID
+			if name == c.Name && guildID == c.GuildID{
+				notifiedChannel[c.GuildID] = c.ID
+				channelIs = true
 			}
 		}
 	}
+	return channelIs
+}
 
-	return channnelid
+func messageCatch(s *discordgo.Session, m *discordgo.MessageCreate){
+	if m.Author.ID == s.State.User.ID {
+		return
+	}
+
+	commands := strings.Split(m.Content, " ")
+	command := commands[0]
+
+	if command == "/noti" {
+		channelIs := commands[1]
+		name := channelList(s, channelIs, m.GuildID)
+		if name == true {
+			s.ChannelMessageSend(m.ChannelID, channelIs + "に設定しました")
+		}else{
+			s.ChannelMessageSend(m.ChannelID, "そのチャンネルは存在していません")
+		}
+	}
 }
